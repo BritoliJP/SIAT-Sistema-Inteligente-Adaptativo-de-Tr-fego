@@ -1,0 +1,6 @@
+venv/
+debug/*.jpg
+*.db
+__pycache__/
+dados_semaforo_*.xlsx
+*.pt
