@@ -1,30 +1,37 @@
-# ====== 1. IMPORTS ======
+# ====== CONTROL: servidor Flask — recebe fotos, calcula tempos, envia pro ESP32 dos LEDs ======
+
+import sys
+import os
+
+# BASE_DIR = pasta onde este arquivo (server.py) está, não importa de onde você rodou o comando
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Adiciona a pasta vision/ (irmã de control/) ao caminho de busca de módulos do Python,
+# assim "from deteccao import contar_carros" funciona sem precisar instalar nada como pacote
+sys.path.append(os.path.join(BASE_DIR, "..", "vision"))
+
 from flask import Flask, request, jsonify
 import cv2
-import numpy as np
 import requests
-import os
 import sqlite3
 from datetime import datetime
-from ultralytics import YOLO
 
-# ====== 2. CONFIGURAÇÃO INICIAL (roda uma vez, quando o servidor liga) ======
+from deteccao import contar_carros  # vem de siat/vision/deteccao.py
+
+# ====== CONFIGURAÇÃO INICIAL ======
 app = Flask(__name__)
-
-modelo = YOLO('yolov8n.pt')  # baixa automaticamente na primeira execução
-
-# Classes do dataset COCO que nos interessam (veículos)
-CLASSES_VEICULOS = {2: "carro", 3: "moto", 5: "onibus", 7: "caminhao"}
 
 contagem_vias = {"via1": 0, "via2": 0}
 IP_ESP32_LEDS = "http://192.168.0.101"
 
-DB_PATH = "semaforo.db"
+# Caminhos ancorados em BASE_DIR: funcionam igual rodando "python server.py" de dentro
+# de control/, ou "python control/server.py" da raiz do projeto (siat/)
+DB_PATH = os.path.join(BASE_DIR, "semaforo.db")
+DEBUG_DIR = os.path.join(BASE_DIR, "debug")
 
 
-# ====== 2.1 BANCO DE DADOS ======
+# ====== BANCO DE DADOS ======
 def get_db():
-    # check_same_thread=False porque o Flask pode atender requisições em threads diferentes
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
@@ -34,7 +41,6 @@ def iniciar_banco():
     conn = get_db()
     cursor = conn.cursor()
 
-    # Dados que o ESP32-CAM envia para o servidor (fotos -> contagem de carros)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS deteccoes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -45,7 +51,6 @@ def iniciar_banco():
         )
     """)
 
-    # Dados que o servidor calcula e envia de volta para o ESP32 dos LEDs
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS tempos_calculados (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -58,7 +63,6 @@ def iniciar_banco():
         )
     """)
 
-    # Cada vez que o ESP32 dos LEDs pede o horário ao servidor
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS sincronizacoes_horario (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -72,31 +76,7 @@ def iniciar_banco():
     conn.close()
 
 
-# ====== 3. FUNÇÃO DE DETECÇÃO (só é executada quando chamada) ======
-def contar_carros(imagem_bytes):
-    img_array = np.frombuffer(imagem_bytes, np.uint8)
-    img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-
-    resultados = modelo(img, conf=0.4, verbose=False, device='cpu')[0]
-
-    contador = 0
-    img_debug = img.copy()
-
-    for box in resultados.boxes:
-        classe_id = int(box.cls[0])
-        if classe_id in CLASSES_VEICULOS:
-            contador += 1
-            x1, y1, x2, y2 = map(int, box.xyxy[0])
-            nome = CLASSES_VEICULOS[classe_id]
-            confianca = float(box.conf[0])
-            cv2.rectangle(img_debug, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            cv2.putText(img_debug, f"{nome} {confianca:.2f}", (x1, y1 - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-
-    return contador, img_debug
-
-
-# ====== 4. FUNÇÃO DE CÁLCULO DE TEMPO (só é executada quando chamada) ======
+# ====== CÁLCULO DE TEMPO ======
 def calcular_tempos():
     total = contagem_vias["via1"] + contagem_vias["via2"]
     if total == 0:
@@ -114,7 +94,6 @@ def calcular_tempos():
         print(f"Erro ao enviar tempos para o ESP32: {e}")
         sucesso = False
 
-    # Grava no banco o que foi calculado e se chegou a ser enviado com sucesso
     conn = get_db()
     conn.execute(
         """INSERT INTO tempos_calculados
@@ -127,7 +106,7 @@ def calcular_tempos():
     conn.close()
 
 
-# ====== 5. ROTA HTTP (só é executada quando o ESP32-CAM faz o POST) ======
+# ====== ROTA: recebe a foto do ESP32-CAM ======
 @app.route('/upload/<via>', methods=['POST'])
 def upload(via):
     imagem_bytes = request.data
@@ -138,10 +117,9 @@ def upload(via):
     contagem_vias[via] = n_carros
 
     timestamp = datetime.now().strftime("%H%M%S")
-    nome_arquivo = f"debug/{via}_{timestamp}.jpg"
+    nome_arquivo = os.path.join(DEBUG_DIR, f"{via}_{timestamp}.jpg")
     cv2.imwrite(nome_arquivo, imagem_debug)
 
-    # Grava no banco a detecção recebida da câmera
     conn = get_db()
     conn.execute(
         "INSERT INTO deteccoes (via, quantidade_carros, imagem_debug, timestamp) VALUES (?, ?, ?, ?)",
@@ -155,13 +133,12 @@ def upload(via):
     return "OK", 200
 
 
-# ====== 6. HORÁRIO (o servidor/notebook vira a "fonte da verdade" do tempo) ======
+# ====== ROTA: horário (fonte da verdade do tempo) ======
 @app.route('/horario', methods=['GET'])
 def horario():
     agora = datetime.now()
     hora_texto = agora.strftime("%H:%M:%S")
 
-    # Grava no banco que alguém (o ESP32 dos LEDs) pediu o horário
     conn = get_db()
     conn.execute(
         "INSERT INTO sincronizacoes_horario (ip_solicitante, hora_enviada, timestamp) VALUES (?, ?, ?)",
@@ -171,13 +148,13 @@ def horario():
     conn.close()
 
     return jsonify({
-        "hora": hora_texto,                      # ex: "14:35:22"
-        "data": agora.strftime("%d/%m/%Y"),      # ex: "15/09/2026"
-        "timestamp": int(agora.timestamp())      # número único representando o momento exato
+        "hora": hora_texto,
+        "data": agora.strftime("%d/%m/%Y"),
+        "timestamp": int(agora.timestamp())
     })
 
 
-# ====== 6.1 ROTAS PARA CONSULTAR O BANCO (úteis pra ver os dados sem abrir o SQLite manualmente) ======
+# ====== ROTAS DE CONSULTA AO BANCO ======
 @app.route('/dados/deteccoes', methods=['GET'])
 def listar_deteccoes():
     conn = get_db()
@@ -202,22 +179,20 @@ def listar_sincronizacoes():
     return jsonify([dict(l) for l in linhas])
 
 
-# ====== 7. INICIALIZAÇÃO DO SERVIDOR (só roda se o arquivo for executado diretamente) ======
+# ====== INICIALIZAÇÃO DO SERVIDOR ======
 if __name__ == '__main__':
-    os.makedirs("debug", exist_ok=True)
+    os.makedirs(DEBUG_DIR, exist_ok=True)
     iniciar_banco()
     app.run(host='0.0.0.0', port=5000, debug=True)
 
 
-# COMANDOS ÚTEIS NO SERVIDOR:
-    # --HORARIO:  curl http://localhost:5000/horario
-    # --IA:       curl -X POST -H "Content-Type: image/jpeg" --data-binary "@fototeste.jpg" http://localhost:5000/upload/via1
-    # --Detecções:             curl http://localhost:5000/dados/deteccoes
-    # --Decisão do servidor:   curl http://localhost:5000/dados/tempos
-    # --EspLED_Pede_horarios:  curl http://localhost:5000/dados/sincronizacoes
-    # --Exportar dados em excel: python exportar_excel.py
-
-# COMANDOS DO AMBIENTE VIRTUAL:
-    # --Ambiente virtual [venv]: source venv/bin/activate
-    # --Desativação: deactivate
-
+# COMANDOS ÚTEIS (rode a partir de qualquer pasta, os caminhos internos já se ajustam sozinhos):
+    # HORARIO:   curl http://localhost:5000/horario
+    # UPLOAD:    curl -X POST -H "Content-Type: image/jpeg" --data-binary "@foto_via1.jpg" http://localhost:5000/upload/via1
+    # VER DADOS: curl http://localhost:5000/dados/deteccoes
+    #            curl http://localhost:5000/dados/tempos
+    #            curl http://localhost:5000/dados/sincronizacoes
+    #
+    # PARA RODAR:
+    #   a partir da raiz do projeto (siat/):  python control/server.py
+    #   ou de dentro de control/:             python server.py
