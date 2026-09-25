@@ -4,3 +4,11 @@ debug/*.jpg
 __pycache__/
 dados_semaforo_*.xlsx
 *.pt
+
+# Dashboard (React/Bun)
+dashboard/node_modules/
+dashboard/dist/
+dashboard/.output/
+dashboard/.vinxi/
+dashboard/.vite/
+dashboard/*.local

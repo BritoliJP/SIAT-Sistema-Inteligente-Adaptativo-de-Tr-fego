@@ -11,6 +11,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(BASE_DIR, "..", "vision"))
 
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 import cv2
 import requests
 import sqlite3
@@ -20,6 +21,11 @@ from deteccao import contar_carros  # vem de siat/vision/deteccao.py
 
 # ====== CONFIGURAÇÃO INICIAL ======
 app = Flask(__name__)
+
+# Libera acesso das rotas de dados para o dashboard React, que roda em outra porta/origem
+# (ex: http://localhost:3000). Sem isso, o navegador bloqueia o fetch() por política de CORS
+# caso o dashboard não esteja passando pelo proxy do Vite.
+CORS(app, resources={r"/dados/*": {"origins": "*"}, r"/horario": {"origins": "*"}})
 
 contagem_vias = {"via1": 0, "via2": 0}
 IP_ESP32_LEDS = "http://192.168.0.101"
@@ -186,9 +192,18 @@ if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
 
 
+
+    # A interface gráfica (dashboard React) é um projeto separado que roda com "bun dev" e
+    # consome as rotas /dados/... daqui através de um proxy configurado no vite.config.ts dele.
+    # Este servidor Flask não serve nenhuma página HTML — só a API JSON.
+
+
 # COMANDOS ÚTEIS (rode a partir de qualquer pasta, os caminhos internos já se ajustam sozinhos):
     # HORARIO:   curl http://localhost:5000/horario
-    # UPLOAD:    curl -X POST -H "Content-Type: image/jpeg" --data-binary "@foto_via1.jpg" http://localhost:5000/upload/via1
+    
+    # UPLOAD:    curl -X POST -H "Content-Type: image/jpeg" --data-binary "@tests/teste.jpg" http://localhost:5000/upload/via1
+    #            curl -X POST -H "Content-Type: image/jpeg" --data-binary "@tests/trafego.jpg" http://localhost:5000/upload/via2
+    
     # VER DADOS: curl http://localhost:5000/dados/deteccoes
     #            curl http://localhost:5000/dados/tempos
     #            curl http://localhost:5000/dados/sincronizacoes
@@ -196,3 +211,5 @@ if __name__ == '__main__':
     # PARA RODAR:
     #   a partir da raiz do projeto (siat/):  python control/server.py
     #   ou de dentro de control/:             python server.py
+    #
+    # (VENV): source venv/bin/activate
