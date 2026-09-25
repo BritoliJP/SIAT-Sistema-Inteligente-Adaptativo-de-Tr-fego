@@ -1,5 +1,5 @@
 venv/
-debug/*.jpg
+**/debug/*.jpg
 *.db
 __pycache__/
 dados_semaforo_*.xlsx

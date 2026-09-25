@@ -209,7 +209,13 @@ if __name__ == '__main__':
     #            curl http://localhost:5000/dados/sincronizacoes
     #
     # PARA RODAR:
+    #   (VENV): source venv/bin/activate
+
     #   a partir da raiz do projeto (siat/):  python control/server.py
     #   ou de dentro de control/:             python server.py
     #
-    # (VENV): source venv/bin/activate
+    #   DASHBOARD(REACT):   cd ~/Área\ de\ trabalho/semaforo-inteligente/dashboard
+    #                       bun dev 
+    #
+    #
+    #

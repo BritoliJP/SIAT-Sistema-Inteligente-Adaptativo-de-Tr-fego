@@ -6,7 +6,6 @@ import {
   CarFront,
   ChevronDown,
    Clock3,
-   Download,
   Gauge,
   LayoutDashboard,
   Menu,
@@ -28,7 +27,7 @@ import {
   YAxis,
 } from "recharts";
 import { Button } from "@/components/ui/button";
-import logoAsset from "@/assets/siat-logo.png.asset.json";
+import logoUrl from "@/assets/siat-logo.png";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -101,37 +100,27 @@ function Index() {
   useEffect(() => {
     void updateData();
     const timer = window.setInterval(() => void updateData(), 5000);
-    return () => window.clearInterval(timer);
+
+    // Navegadores desaceleram o setInterval em abas fora de foco. Isso faz o dashboard
+    // buscar dados imediatamente assim que a aba volta a ficar visível, em vez de esperar
+    // o próximo tick do timer (que pode demorar bem mais que 5s depois de ficar em segundo plano).
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") {
+        void updateData();
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibility);
+
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", handleVisibility);
+    };
   }, [updateData]);
 
   const chartTimes = useMemo(() => times.map((item) => ({ ...item, hora: formatTime(item.timestamp) })), [times]);
   const chartDetections = useMemo(() => detections.map((item) => ({ ...item, hora: formatTime(item.timestamp) })), [detections]);
   const latest = times.at(-1) ?? initialTimes.at(-1);
   const totalCars = detections.reduce((sum, item) => sum + item.quantidade_carros, 0);
-
-  const exportReport = useCallback(() => {
-    const lines: string[] = [
-      "Relatório SIAT — Sistema Inteligente Adaptativo de Tráfego",
-      `Gerado em: ${new Date().toLocaleString("pt-BR")}`,
-      "",
-      "Tempos de verde (s)",
-      "Horário;Via 1;Via 2",
-      ...times.map((t) => `${formatTime(t.timestamp)};${t.tempo_via1};${t.tempo_via2}`),
-      "",
-      "Veículos detectados",
-      "Horário;Via;Quantidade",
-      ...detections.map((d) => `${formatTime(d.timestamp)};${d.via};${d.quantidade_carros}`),
-      "",
-      `Total de veículos na janela;${totalCars}`,
-    ];
-    const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `relatorio-siat-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.csv`;
-    link.click();
-    URL.revokeObjectURL(url);
-  }, [times, detections, totalCars]);
 
   return (
     <div className="min-h-screen bg-background text-foreground lg:grid lg:grid-cols-[258px_minmax(0,1fr)]">
@@ -140,7 +129,7 @@ function Index() {
       <aside className={`fixed inset-y-0 left-0 z-40 flex w-[258px] flex-col bg-sidebar text-sidebar-foreground transition-transform duration-300 lg:sticky lg:top-0 lg:h-screen ${menuOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0"}`}>
         <div className="flex h-24 items-center border-b border-sidebar-border px-6">
           <div className="rounded-md bg-card px-3 py-2">
-            <img src={logoAsset.url} alt="SIAT — Sistema Inteligente Adaptativo de Tráfego" className="h-11 w-40 object-contain" />
+            <img src={logoUrl} alt="SIAT — Sistema Inteligente Adaptativo de Tráfego" className="h-11 w-40 object-contain" />
           </div>
           <Button variant="ghost" size="icon" className="ml-auto text-sidebar-foreground lg:hidden" onClick={() => setMenuOpen(false)} aria-label="Fechar menu"><X /></Button>
         </div>
@@ -149,9 +138,8 @@ function Index() {
           <p className="mb-3 px-3 text-[11px] font-bold uppercase tracking-[0.16em] text-sidebar-foreground/50">Monitoramento</p>
           <div className="space-y-1">
             {navItems.map(({ label, icon: Icon }, index) => (
-              <button key={label} onClick={label === "Relatórios" ? exportReport : undefined} className={`flex h-11 w-full items-center gap-3 rounded-md px-3 text-left text-sm font-semibold transition-colors ${index === 0 ? "bg-sidebar-accent text-sidebar-accent-foreground" : "text-sidebar-foreground/65 hover:bg-sidebar-accent/60 hover:text-sidebar-foreground"}`}>
+              <button key={label} className={`flex h-11 w-full items-center gap-3 rounded-md px-3 text-left text-sm font-semibold transition-colors ${index === 0 ? "bg-sidebar-accent text-sidebar-accent-foreground" : "text-sidebar-foreground/65 hover:bg-sidebar-accent/60 hover:text-sidebar-foreground"}`}>
                 <Icon className={index === 0 ? "text-signal-green" : ""} size={19} />{label}
-                {label === "Relatórios" && <Download size={15} className="ml-auto opacity-60" />}
               </button>
             ))}
           </div>
