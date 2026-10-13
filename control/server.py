@@ -1,4 +1,6 @@
-# ====== CONTROL: servidor Flask — recebe fotos, calcula tempos, envia pro ESP32 dos LEDs ======
+# ====== CONTROL: servidor Flask — recebe fotos, conta carros e envia ao ESP32 dos LEDs a RAZÃO de carros
+# de cada via. Quem calcula o tempo e controla o semáforo é o ESP32, que devolve ao servidor os tempos
+# de verde que calculou (para o dashboard mostrar). Este servidor não calcula tempo nem cuida de horário. ======
 
 import sys
 import os
@@ -25,7 +27,7 @@ app = Flask(__name__)
 # Libera acesso das rotas de dados para o dashboard React, que roda em outra porta/origem
 # (ex: http://localhost:3000). Sem isso, o navegador bloqueia o fetch() por política de CORS
 # caso o dashboard não esteja passando pelo proxy do Vite.
-CORS(app, resources={r"/dados/*": {"origins": "*"}, r"/horario": {"origins": "*"}})
+CORS(app, resources={r"/dados/*": {"origins": "*"}})
 
 contagem_vias = {"via1": 0, "via2": 0}
 IP_ESP32_LEDS = "http://192.168.0.101"
@@ -47,6 +49,7 @@ def iniciar_banco():
     conn = get_db()
     cursor = conn.cursor()
 
+    # Uma linha por foto processada: o que a câmera viu
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS deteccoes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -57,6 +60,8 @@ def iniciar_banco():
         )
     """)
 
+    # Uma linha por cálculo feito pelo ESP32: os tempos de verde que ele devolveu ao servidor
+    # (mesma estrutura de antes, então bancos já existentes continuam compatíveis)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS tempos_calculados (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -69,47 +74,29 @@ def iniciar_banco():
         )
     """)
 
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS sincronizacoes_horario (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ip_solicitante TEXT,
-            hora_enviada TEXT NOT NULL,
-            timestamp TEXT NOT NULL
-        )
-    """)
-
     conn.commit()
     conn.close()
 
 
-# ====== CÁLCULO DE TEMPO ======
-def calcular_tempos():
+# ====== ENVIO DA RAZÃO PARA O ESP32 (quem calcula o tempo é o ESP32) ======
+def enviar_razao_ao_esp32():
     total = contagem_vias["via1"] + contagem_vias["via2"]
+
     if total == 0:
-        tempos = {"via1": 15, "via2": 15}
+        # Nenhum carro nas duas vias: manda 0 e 0 (o ESP32 entende como "sem movimento")
+        razao_via1 = 0.0
+        razao_via2 = 0.0
     else:
-        proporcao1 = contagem_vias["via1"] / total
-        tempo_via1 = max(10, min(40, int(10 + proporcao1 * 30)))
-        tempo_via2 = max(10, min(40, int(10 + (1 - proporcao1) * 30)))
-        tempos = {"via1": tempo_via1, "via2": tempo_via2}
+        razao_via1 = contagem_vias["via1"] / total
+        razao_via2 = contagem_vias["via2"] / total
 
-    sucesso = True
+    payload = {"razao_via1": razao_via1, "razao_via2": razao_via2}
+
     try:
-        requests.post(f"{IP_ESP32_LEDS}/tempos", json=tempos, timeout=2)
+        requests.post(f"{IP_ESP32_LEDS}/razao", json=payload, timeout=2)
+        print(f"[ESP32] razão enviada -> via1: {razao_via1:.2f} | via2: {razao_via2:.2f}")
     except requests.exceptions.RequestException as e:
-        print(f"Erro ao enviar tempos para o ESP32: {e}")
-        sucesso = False
-
-    conn = get_db()
-    conn.execute(
-        """INSERT INTO tempos_calculados
-           (tempo_via1, tempo_via2, carros_via1, carros_via2, enviado_com_sucesso, timestamp)
-           VALUES (?, ?, ?, ?, ?, ?)""",
-        (tempos["via1"], tempos["via2"], contagem_vias["via1"], contagem_vias["via2"],
-         int(sucesso), datetime.now().isoformat(timespec="seconds"))
-    )
-    conn.commit()
-    conn.close()
+        print(f"Erro ao enviar razão para o ESP32: {e}")
 
 
 # ====== ROTA: recebe a foto do ESP32-CAM ======
@@ -135,29 +122,36 @@ def upload(via):
     conn.close()
 
     print(f"[{via}] {n_carros} carro(s) detectado(s)")
-    calcular_tempos()
+    enviar_razao_ao_esp32()
     return "OK", 200
 
 
-# ====== ROTA: horário (fonte da verdade do tempo) ======
-@app.route('/horario', methods=['GET'])
-def horario():
-    agora = datetime.now()
-    hora_texto = agora.strftime("%H:%M:%S")
+# ====== ROTA: recebe do ESP32 dos LEDs os tempos de verde que ele calculou ======
+@app.route('/tempos', methods=['POST'])
+def registrar_tempos():
+    dados = request.get_json(silent=True)
 
+    try:
+        tempo_via1 = int(dados["tempo_via1"])
+        tempo_via2 = int(dados["tempo_via2"])
+    except (KeyError, TypeError, ValueError):
+        return "Dados inválidos", 400
+
+    # O ESP32 só conhece a razão, não a quantidade de carros. A contagem gravada junto com os
+    # tempos é a que o próprio servidor tem da câmera neste momento (a que gerou essa razão).
     conn = get_db()
     conn.execute(
-        "INSERT INTO sincronizacoes_horario (ip_solicitante, hora_enviada, timestamp) VALUES (?, ?, ?)",
-        (request.remote_addr, hora_texto, agora.isoformat(timespec="seconds"))
+        """INSERT INTO tempos_calculados
+           (tempo_via1, tempo_via2, carros_via1, carros_via2, enviado_com_sucesso, timestamp)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (tempo_via1, tempo_via2, contagem_vias["via1"], contagem_vias["via2"],
+         1, datetime.now().isoformat(timespec="seconds"))
     )
     conn.commit()
     conn.close()
 
-    return jsonify({
-        "hora": hora_texto,
-        "data": agora.strftime("%d/%m/%Y"),
-        "timestamp": int(agora.timestamp())
-    })
+    print(f"[ESP32] tempos de verde recebidos -> via1: {tempo_via1}s | via2: {tempo_via2}s")
+    return "OK", 200
 
 
 # ====== ROTAS DE CONSULTA AO BANCO ======
@@ -177,14 +171,6 @@ def listar_tempos():
     return jsonify([dict(l) for l in linhas])
 
 
-@app.route('/dados/sincronizacoes', methods=['GET'])
-def listar_sincronizacoes():
-    conn = get_db()
-    linhas = conn.execute("SELECT * FROM sincronizacoes_horario ORDER BY id DESC LIMIT 100").fetchall()
-    conn.close()
-    return jsonify([dict(l) for l in linhas])
-
-
 # ====== INICIALIZAÇÃO DO SERVIDOR ======
 if __name__ == '__main__':
     os.makedirs(DEBUG_DIR, exist_ok=True)
@@ -199,14 +185,20 @@ if __name__ == '__main__':
 
 
 # COMANDOS ÚTEIS (rode a partir de qualquer pasta, os caminhos internos já se ajustam sozinhos):
-    # HORARIO:   curl http://localhost:5000/horario
-    
+# NO WINDOWS LEMBRE DE RODAR "curl.exe ..." para funcionar
+# No WINDOWS LEMBRE DE ESTAR DENTRO DO DIRETÓRIO CORRETO "siat" PARA OS COMANDOS
+#
+# cd "C:\Users\brito\OneDrive\Área de Trabalho\Faculdade\siat"
+# dir tests
+# curl.exe -X POST -H "Content-Type: image/jpeg" --data-binary "@tests/teste.jpg" http://localhost:5000/upload/via2
+#
+#
+#
     # UPLOAD:    curl -X POST -H "Content-Type: image/jpeg" --data-binary "@tests/teste.jpg" http://localhost:5000/upload/via1
     #            curl -X POST -H "Content-Type: image/jpeg" --data-binary "@tests/trafego.jpg" http://localhost:5000/upload/via2
-    
+
     # VER DADOS: curl http://localhost:5000/dados/deteccoes
     #            curl http://localhost:5000/dados/tempos
-    #            curl http://localhost:5000/dados/sincronizacoes
     #
     # PARA RODAR:
     #   (VENV): source venv/bin/activate
@@ -215,7 +207,22 @@ if __name__ == '__main__':
     #   ou de dentro de control/:             python server.py
     #
     #   DASHBOARD(REACT):   cd ~/Área\ de\ trabalho/semaforo-inteligente/dashboard
-    #                       bun dev 
+    #                       bun dev
     #
     #
     #
+#
+#
+#TERMINAL 1:
+#    cd "C:\Users\brito\OneDrive\Área de Trabalho\Faculdade\siat"
+#  venv\Scripts\Activate.ps1
+#   python control/server.py
+#
+#
+#TERMINAL 2:
+#
+#   cd "C:\Users\brito\OneDrive\Área de Trabalho\Faculdade\siat\dashboard"
+#   bun dev
+#
+#
+#   python control\exportar_excel.py
