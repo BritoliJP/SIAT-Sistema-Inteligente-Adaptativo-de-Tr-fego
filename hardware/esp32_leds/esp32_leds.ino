@@ -3,13 +3,14 @@
 //  - recebe do servidor a RAZÃO de carros de cada via (via1/total e via2/total)
 //  - CALCULA aqui o tempo de verde de cada via
 //  - controla os LEDs do semáforo (quando cada via abre e fecha)
-//  - DEVOLVE ao servidor os tempos de verde calculados (o dashboard mostra esses valores)
+//  - a cada ciclo, ENVIA ao servidor os tempos de verde que está aplicando
+//  - a cada 10 s, AVISA o servidor que está conectado (o dashboard mostra esse status)
 // O servidor não manda horário nem tempo: toda a decisão do semáforo é feita neste ESP32.
 // ===================================================================
 
 #include <WiFi.h>            // Para conectar na rede Wi-Fi
 #include <WebServer.h>       // Para este ESP32 "escutar" mensagens (recebe a razão)
-#include <HTTPClient.h>      // Para este ESP32 "falar" com o servidor (envia os tempos)
+#include <HTTPClient.h>      // Para este ESP32 "falar" com o servidor (tempos e status)
 #include <ArduinoJson.h>     // Para entender/montar o formato JSON
 
 WebServer server(80);   // Mini servidor deste ESP32, na porta 80
@@ -17,7 +18,7 @@ WebServer server(80);   // Mini servidor deste ESP32, na porta 80
 // ---------- CONFIGURAÇÕES QUE VOCÊ PRECISA AJUSTAR ----------
 const char* ssid = "SEU_WIFI";
 const char* password = "SUA_SENHA";
-const char* temposUrl = "http://192.168.0.47:5000/tempos"; // IP do computador onde roda o server.py
+const char* servidorUrl = "http://192.168.0.47:5000"; // IP do computador onde roda o server.py
 // ---------------------------------------------------------------
 
 // ---------- PINOS DOS LEDS — ajuste conforme sua montagem física ----------
@@ -37,12 +38,21 @@ const int TEMPO_PADRAO = 15;   // usado antes da 1ª razão chegar e quando não
 const unsigned long TEMPO_AMARELO = 3000;  // 3 s de amarelo (em milissegundos)
 // ------------------------------------------------
 
-// Tempos de verde de cada via, em segundos
+// Tempos de verde CALCULADOS a partir da última razão recebida (em segundos)
 int tempoVia1 = TEMPO_PADRAO;
 int tempoVia2 = TEMPO_PADRAO;
 
-// Quando fica true, o loop() envia os tempos calculados para o servidor
+// Tempos de verde do ciclo em andamento: são copiados dos de cima no início de cada ciclo
+// e valem até o ciclo acabar. São esses que o servidor recebe, pois são os realmente aplicados.
+int tempoCicloVia1 = TEMPO_PADRAO;
+int tempoCicloVia2 = TEMPO_PADRAO;
+
+// Quando fica true, o loop() envia os tempos do ciclo para o servidor
 bool precisaEnviarTempos = false;
+
+// Aviso periódico ao servidor ("estou conectado")
+const unsigned long INTERVALO_STATUS = 10000;  // 10 s
+unsigned long ultimoStatus = 0;
 
 // ---------- ESTADOS DO SEMÁFORO (sem delay(), controlado pelo millis()) ----------
 const int VERDE_VIA1   = 0;   // via 1 verde,    via 2 vermelha
@@ -74,9 +84,7 @@ void calcularTempos(double razao1, double razao2) {
 
 // ===================================================================
 // FUNÇÃO: recebe a razão de carros enviada pelo servidor Python
-// Responde na hora (200) e deixa o envio dos tempos para o loop():
-// se o POST ao servidor fosse feito aqui dentro, o servidor ficaria esperando
-// a resposta desta rota e estouraria o tempo limite dele
+// Os tempos calculados passam a valer no início do PRÓXIMO ciclo do semáforo
 // ===================================================================
 void handleRazao() {
   StaticJsonDocument<200> doc;
@@ -100,42 +108,62 @@ void handleRazao() {
   calcularTempos(razao1, razao2);
 
   Serial.printf("Razao recebida -> via1: %.2f | via2: %.2f\n", razao1, razao2);
-  Serial.printf("Tempos de verde -> Via1: %ds | Via2: %ds\n", tempoVia1, tempoVia2);
+  Serial.printf("Tempos calculados (valem no proximo ciclo) -> Via1: %ds | Via2: %ds\n", tempoVia1, tempoVia2);
 
-  precisaEnviarTempos = true;   // o loop() faz o envio ao servidor
   server.send(200, "text/plain", "Razao recebida");
 }
 
 // ===================================================================
-// FUNÇÃO: envia ao servidor os tempos de verde que este ESP32 calculou
+// FUNÇÃO: faz um POST em JSON para o servidor e devolve o código HTTP
+// Os dois tempos limite evitam que o semáforo fique parado por muito tempo
+// caso o servidor esteja desligado
 // ===================================================================
-void enviarTemposAoServidor() {
+int postarJson(const char* rota, const String& corpo) {
   HTTPClient http;
-  http.begin(temposUrl);
+  http.begin(String(servidorUrl) + rota);
+  http.setConnectTimeout(2000);
   http.setTimeout(2000);
   http.addHeader("Content-Type", "application/json");
 
+  int codigo = http.POST(corpo);
+
+  http.end();
+  return codigo;
+}
+
+// ===================================================================
+// FUNÇÃO: envia ao servidor os tempos de verde do ciclo que acabou de começar
+// ===================================================================
+void enviarTemposAoServidor() {
   StaticJsonDocument<200> doc;
-  doc["tempo_via1"] = tempoVia1;
-  doc["tempo_via2"] = tempoVia2;
+  doc["tempo_via1"] = tempoCicloVia1;
+  doc["tempo_via2"] = tempoCicloVia2;
 
   String corpo;
   serializeJson(doc, corpo);
 
-  int httpCode = http.POST(corpo);
+  int codigo = postarJson("/tempos", corpo);
 
-  if (httpCode == 200) {
-    Serial.println("Tempos enviados ao servidor com sucesso");
+  if (codigo == 200) {
+    Serial.printf("Ciclo enviado ao servidor -> Via1: %ds | Via2: %ds\n", tempoCicloVia1, tempoCicloVia2);
   } else {
-    Serial.printf("Erro ao enviar tempos ao servidor (codigo %d) — servidor pode estar fora do ar\n", httpCode);
+    Serial.printf("Erro ao enviar tempos ao servidor (codigo %d) — servidor pode estar fora do ar\n", codigo);
   }
+}
 
-  http.end();
+// ===================================================================
+// FUNÇÃO: avisa o servidor que este ESP32 está conectado
+// ===================================================================
+void enviarStatus() {
+  int codigo = postarJson("/status", "{}");
+
+  if (codigo != 200) {
+    Serial.printf("Sem contato com o servidor (codigo %d)\n", codigo);
+  }
 }
 
 // ===================================================================
 // FUNÇÃO: entra em um estado do semáforo (acende os LEDs certos)
-// O tempo de verde é lido AQUI, na hora em que o verde começa
 // ===================================================================
 void aplicarEstado(int estado) {
   // Apaga tudo e depois acende só o que o estado pede
@@ -148,9 +176,15 @@ void aplicarEstado(int estado) {
 
   switch (estado) {
     case VERDE_VIA1:
+      // Início de um novo ciclo: trava os tempos das duas vias até o ciclo acabar
+      // e pede o envio deles ao servidor
+      tempoCicloVia1 = tempoVia1;
+      tempoCicloVia2 = tempoVia2;
+      precisaEnviarTempos = true;
+
       digitalWrite(ledVerdeVia1, HIGH);
       digitalWrite(ledVermelhoVia2, HIGH);
-      duracaoEstado = (unsigned long)tempoVia1 * 1000UL;
+      duracaoEstado = (unsigned long)tempoCicloVia1 * 1000UL;
       break;
 
     case AMARELO_VIA1:
@@ -162,7 +196,7 @@ void aplicarEstado(int estado) {
     case VERDE_VIA2:
       digitalWrite(ledVermelhoVia1, HIGH);
       digitalWrite(ledVerdeVia2, HIGH);
-      duracaoEstado = (unsigned long)tempoVia2 * 1000UL;
+      duracaoEstado = (unsigned long)tempoCicloVia2 * 1000UL;
       break;
 
     case AMARELO_VIA2:
@@ -220,21 +254,32 @@ void setup() {
   server.on("/razao", HTTP_POST, handleRazao);
   server.begin();
 
+  // Primeiro aviso ao servidor, antes de começar o ciclo
+  enviarStatus();
+  ultimoStatus = millis();
+
   // Começa o ciclo do semáforo
   aplicarEstado(VERDE_VIA1);
 }
 
 // ===================================================================
 // LOOP — roda repetidamente, para sempre, enquanto o ESP32 estiver ligado
-// Nada aqui trava por muito tempo: cada passada é rápida, então o ESP32
-// sempre consegue atender o servidor enquanto o semáforo segue funcionando
+// Cada passada é rápida, então o ESP32 sempre consegue atender o servidor
+// enquanto o semáforo segue funcionando
 // ===================================================================
 void loop() {
   server.handleClient();   // Fica de olho se chegou uma nova razão do servidor
   atualizarSemaforo();     // Avança verde/amarelo/vermelho quando o tempo acaba
 
+  // Início de ciclo: informa ao servidor os tempos de verde que estão valendo
   if (precisaEnviarTempos) {
     precisaEnviarTempos = false;
     enviarTemposAoServidor();
+  }
+
+  // Aviso periódico: "estou conectado"
+  if (millis() - ultimoStatus >= INTERVALO_STATUS) {
+    ultimoStatus = millis();
+    enviarStatus();
   }
 }
